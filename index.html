@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>three.js webgl - equirectangular video panorama</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <link type="text/css" rel="stylesheet" href="main.css">
+    <style>
+        body {
+            touch-action: none;
+        }
+    </style>
+</head>
+<body>
+    <!-- Import maps polyfill -->
+    <!-- Remove this when import maps will be widely supported -->
+    <script async src="https://unpkg.com"></script>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "./build/three.module.js",
+                "three/addons/": "./jsm/"
+            }
+        }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import { ARButton } from 'three/addons/webxr/ARButton.js';
+        //Add this for stats animation
+        import Stats from 'three/addons/libs/stats.module.js';
+        import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        //
+        let camera, scene, renderer, stats; 
+        let controller;
+        //Add clock
+        const clock = new THREE.Clock();
+        //Add Mixer
+        let mixer;
+
+        // Variables aisladas para almacenar el array de clips y el estado de animación actual
+        let clipsKnight = [];
+        let accionActual = null;
+
+        init();
+        animate();
+
+        function init() {
+            const container = document.createElement( 'div' );
+            document.body.appendChild( container );
+
+            scene = new THREE.Scene();
+
+            camera = new THREE.PerspectiveCamera( 70, window.innerWidth / window.innerHeight, 0.01, 20 );
+
+            scene.add( new THREE.HemisphereLight( 0xa5a5a5, 0x898989, 3 ) );
+
+            const light = new THREE.DirectionalLight( 0xffffff, 3 );
+            light.position.set( 1, 1, 1 ).normalize();
+            scene.add( light );
+
+            //Load GLTF Model
+            new GLTFLoader()
+                .setPath( 'models/gltf/' )
+                .load( 'Nave.gltf', function ( gltf ) {
+                    gltf.scene.scale.set(.003, .003, .003);
+                    gltf.scene.position.x = -0.8;
+                    gltf.scene.position.y = 0.3;
+                    gltf.scene.position.z = -1.5;
+                    scene.add( gltf.scene );
+                } );
+
+            // Load GLTF Model and Animation (Knight_01)
+            const loader = new GLTFLoader();
+            loader.load( 'models/gltf/Knight_01.glb', function ( gltf ) {
+                const object = gltf.scene;
+                
+                // CORRECCIÓN DEFINITIVA DE ESCALA: Al ser .glb corregido de Unity, se usa escala real 1
+                object.scale.set(1, 1, 1);
+                object.position.x = 0.8;
+                object.position.y = -0.5;
+                object.position.z = -1.5;
+                // object.rotation.y = Math.PI / 2; // Rotando 90
+
+                mixer = new THREE.AnimationMixer( object );
+                
+                // Guardamos el array nativo de animaciones (.animations)
+                clipsKnight = gltf.animations;
+
+                // Inicialización original: Reproduce la caminata (índice 0) por defecto
+                accionActual = mixer.clipAction( clipsKnight[ 0 ] );
+                accionActual.play();
+
+                object.traverse( function ( child ) {
+                    if ( child.isMesh ) {
+                        child.castShadow = true;
+                        child.receiveShadow = true;
+                    }
+                } );
+
+                scene.add( object );
+            } );
+
+            //
+            renderer = new THREE.WebGLRenderer( { antialias: true, alpha: true } );
+            renderer.setPixelRatio( window.devicePixelRatio );
+            renderer.setSize( window.innerWidth, window.innerHeight );
+            renderer.xr.enabled = true;
+            container.appendChild( renderer.domElement );
+
+            // ADD stats
+            stats = new Stats();
+            container.appendChild( stats.dom );
+
+            //
+            document.body.appendChild( ARButton.createButton( renderer ) );
+
+            //
+            window.addEventListener( 'resize', onWindowResize );
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize( window.innerWidth, window.innerHeight );
+        }
+
+        // Función encargada de evaluar el control de Xbox mediante un switch analítico
+        function procesarMandoXbox() {
+            if ( !mixer || clipsKnight.length === 0 ) return;
+
+            let fenixPad = null;
+            const session = renderer.xr.getSession();
+
+            // 1. Intentar capturar el Gamepad desde la sesión inmersiva de Realidad Aumentada (Celular en sala)
+            if ( session ) {
+                for ( const source of session.inputSources ) {
+                    if ( source.gamepad ) {
+                        fenixPad = source.gamepad;
+                        break;
+                    }
+                }
+            }
+
+            // 2. Si no ha entrado a modo AR, buscarlo mediante la API nativa de Chrome Mobile
+            if ( !fenixPad && navigator.getGamepads ) {
+                const gamepads = navigator.getGamepads();
+                for ( let i = 0; i < gamepads.length; i++ ) {
+                    if ( gamepads[ i ] ) {
+                        fenixPad = gamepads[ i ];
+                        break;
+                    }
+                }
+            }
+
+            if ( !fenixPad || !fenixPad.buttons ) return;
+
+            // Mapeo estándar de Gatillos Analógicos en móviles: Índice 6 = LT, Índice 7 = RT
+            // Se lee el estado booleano .pressed
+            const gatilloIzquierdo = fenixPad.buttons[ 6 ] ? fenixPad.buttons[ 6 ].pressed : false;
+            const gatilloDerecho = fenixPad.buttons[ 7 ] ? fenixPad.buttons[ 7 ].pressed : false;
+
+            // Detectamos el índice del clip que se está reproduciendo actualmente
+            let indiceDeseado = accionActual ? clipsKnight.indexOf( accionActual.getClip() ) : 0;
+            if ( indiceDeseado === -1 ) indiceDeseado = 0;
+
+            // Switch binario para alternar de forma interactiva entre estados de animación
+            switch ( true ) {
+                // Gatillo Derecho (RT) presionado -> Correr (Índice 1)
+                case ( gatilloDerecho ):
+                    indiceDeseado = 1;
+                    break;
+
+                // Gatillo Izquierdo (LT) presionado -> Caminar (Índice 0)
+                case ( gatilloIzquierdo ):
+                    indiceDeseado = 0;
+                    break;
+
+                // Sin gatillos -> Mantiene el último estado seleccionado para transiciones estables
+                default:
+                    break;
+            }
+
+            // Si el switch determina un cambio de índice, realizamos una mezcla suave (Crossfade)
+            const proximaAccion = mixer.clipAction( clipsKnight[ indiceDeseado ] );
+            if ( proximaAccion !== accionActual ) {
+                const accionAnterior = accionActual;
+                accionActual = proximaAccion;
+                
+                accionActual.reset();
+                // 0.25 segundos de transición para un cambio de ritmo fluido en tu espacio real
+                accionActual.crossFadeFrom( accionAnterior, 0.25, true ); 
+                accionActual.play();
+            }
+        }
+
+        // 
+        function animate() {
+            const delta = clock.getDelta();
+            if ( mixer ) mixer.update( delta );
+            
+            // Evaluamos el estado del control de Xbox en cada frame
+            procesarMandoXbox();
+
+            stats.update();
+            render();
+        }
+
+        renderer.setAnimationLoop( animate );
+
+        function render() {
+            renderer.render( scene, camera );
+        }
+    </script>
+</body>
+</html>
